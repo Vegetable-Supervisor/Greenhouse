@@ -7,9 +7,13 @@ def setup():
     log = logging.getLogger('greenhouse')
 
     gh = GreenHouse("greenhouse", log)
-    gh.connect()
-    gh.run_rest()
+    connected = gh.connect()
 
+    if not connected:
+        log.info("Could not connect GreenHouse to Supervisor.")
+        return
+
+    gh.run()
 
 if __name__ == "__main__":
     setup()

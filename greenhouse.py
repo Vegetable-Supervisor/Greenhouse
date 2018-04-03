@@ -1,10 +1,11 @@
 import modules.ssdp as ssdp
-from flask import Flask
-from flask import send_file
+from flask import Flask, send_file, abort, request
 import urllib.request
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import http
+
+from supervisor import Supervisor
 
 class GreenHouse:
     """A GreenHouse represents a connected greenhouse."""
@@ -23,26 +24,37 @@ class GreenHouse:
         # for now support only one supervisor
         if len(resps) != 1:
             self.logger.info("detected {} supervisors, GreenHouse only supports one supervisor".format(len(resps)))
-            return
+            return False
 
         discovery_resp = resps[0]
-        self.logger.info("discovered supervisor at {}".format(discovery_resp.location))
+        self.supervisor = Supervisor(discovery_resp.location)
 
-        self.supervisor_address = discovery_resp.location
+        self.logger.info("discovered supervisor at {}".format(self.supervisor.location))
+
 
         # Join Step
-        while not self._send_join_request():
-            # TODO : retry timer
-            pass
+        joined = self._join_request()
+        if not joined:
+            self.logger.info("could not join supervisor")
+            return False
 
         self.logger.info("join accepted")
+        return True
 
-    def run_rest(self):
+    def run(self):
         """Run the REST api, using HTTPS."""
+        assert(self.supervisor)
+
+        # Only allow Supervisor's IP to access REST API
+        @self.app.before_request
+        def limit_remote_addr():
+            if request.remote_addr != self.supervisor.ip:
+                abort(http.HTTPStatus.FORBIDDEN)
 
         # Route Handlers
-        @self.app.route("/")
-        def hello():
+
+        @self.app.route("/name")
+        def name():
             return self.name
 
         @self.app.route("/camera")
@@ -52,9 +64,10 @@ class GreenHouse:
 
         self.app.run(ssl_context='adhoc')
 
-    def _send_join_request(self):
-        assert(self.supervisor_address)
-        url = "http://" + self.supervisor_address + "/join" # TODO https
+    def _join_request(self):
+        """Send a join request and wait for response. Returns True if and only if the Supervisor accepted the join request."""
+        assert(self.supervisor)
+        url = "http://" + str(self.supervisor.ip) + ":" + str(self.supervisor.port) + "/join" # TODO https
         post_fields = {'name': self.name}
         request = Request(url, urlencode(post_fields).encode())
         got = urlopen(request)
