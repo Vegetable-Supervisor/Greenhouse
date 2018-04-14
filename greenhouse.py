@@ -1,19 +1,22 @@
 import modules.ssdp as ssdp
-from flask import Flask, send_file, abort, request
+from flask import Flask, send_file, abort, request, jsonify, make_response
 import urllib.request
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import http
+import io
+import json
 
 from supervisor import Supervisor
+from configuration import Configuration
 
 class GreenHouse:
     """A GreenHouse represents a connected greenhouse."""
 
     def __init__(self, name, logger):
-        self.name = name
         self.logger = logger
-        self.app = Flask(self.name)
+        self.app = Flask("greenhouse")
+        self.configuration = Configuration(name="greenhouse", description="not yet configured")
 
     def connect(self):
         """Perform the connection establishment to a Supervisor in the same LAN."""
@@ -45,17 +48,24 @@ class GreenHouse:
         """Run the REST api, using HTTPS."""
         assert(self.supervisor)
 
-        # Only allow Supervisor's IP to access REST API
-        @self.app.before_request
-        def limit_remote_addr():
-            if request.remote_addr != self.supervisor.ip:
-                abort(http.HTTPStatus.FORBIDDEN)
+        # # Only allow Supervisor's IP to access REST API
+        # @self.app.before_request
+        # def limit_remote_addr():
+        #     if request.remote_addr != self.supervisor.ip:
+        #         abort(http.HTTPStatus.FORBIDDEN)
 
         # Route Handlers
 
         @self.app.route("/name")
         def name():
-            return self.name
+            return self.configuration.name
+
+        @self.app.route("/get_configuration")
+        def get_configuration():
+            # desc = "configuration for greenhouse {}".format(self.confi)
+            r = make_response(json.dumps(self.configuration.__dict__))
+            r.mimetype = 'application/json'
+            return r
 
         @self.app.route("/camera")
         def camera():
@@ -68,7 +78,7 @@ class GreenHouse:
         """Send a join request and wait for response. Returns True if and only if the Supervisor accepted the join request."""
         assert(self.supervisor)
         url = "http://" + str(self.supervisor.ip) + ":" + str(self.supervisor.port) + "/join" # TODO https
-        post_fields = {'name': self.name}
+        post_fields = {'name': self.configuration.name}
         request = Request(url, urlencode(post_fields).encode())
         got = urlopen(request)
         if got.getcode() == http.HTTPStatus.ACCEPTED:
