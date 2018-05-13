@@ -1,58 +1,63 @@
-import modules.ssdp as ssdp
-from flask import Flask, send_file, abort, request, jsonify, make_response
-import urllib.request
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 import http
 import io
 import json
+import logging
+import time
+import socket
+import threading
+import urllib.request
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from flask import Flask, send_file, abort, request, jsonify, make_response
+from flask_api import status
+
+import modules.ssdp as ssdp
 
 from supervisor import Supervisor
 from configuration import Configuration
 
+REST_PORT = 5943
+REST_HOST = "0.0.0.0"
+REST_URL = "https://{}:{}".format(REST_HOST, REST_PORT)
+
+
 class GreenHouse:
     """A GreenHouse represents a connected greenhouse."""
 
-    def __init__(self, name, logger):
-        self.logger = logger
-        self.app = Flask("greenhouse")
-        self.configuration = Configuration(name="greenhouse", description="not yet configured")
+    def __init__(self, name: str):
+        """Create a connected GreenHouse.
 
-    def connect(self):
-        """Perform the connection establishment to a Supervisor in the same LAN."""
-
-        # Discovery Step
-        resps = list(ssdp.discover("vegetable-supervisor"))
-
-        # for now support only one supervisor
-        if len(resps) != 1:
-            self.logger.info("detected {} supervisors, GreenHouse only supports one supervisor".format(len(resps)))
-            return False
-
-        discovery_resp = resps[0]
-        self.supervisor = Supervisor(discovery_resp.location)
-
-        self.logger.info("discovered supervisor at {}".format(self.supervisor.location))
-
-
-        # Join Step
-        joined = self._join_request()
-        if not joined:
-            self.logger.info("could not join supervisor")
-            return False
-
-        self.logger.info("join accepted")
-        return True
+        Keyword Arguments:
+        name -- name of the GreenHouse to create
+        """
+        self.name = name
+        self.usn = "greenhouse_{}_{}".format(self.name, time.time())
+        self.logger = logging.getLogger(self.name)
+        self.configuration = Configuration(
+            name="greenhouse", description="not yet configured")
+        self.app = Flask(self.name)
+        self.ssdp_server = ssdp.SSDPServer()
+        self.ssdp_server.register(
+            manifestation="local",
+            usn=self.usn,
+            st="greenhouse",
+            location=REST_URL,
+            server=self.name,
+        )
 
     def run(self):
-        """Run the REST api, using HTTPS."""
-        assert(self.supervisor)
+        self.logger.info("starting SSDP advertiser")
+        threading.Thread(target=self.run_ssdp_server, daemon=True).start()
+        self.logger.info("starting REST API")
+        self.run_rest()
 
-        # # Only allow Supervisor's IP to access REST API
-        # @self.app.before_request
-        # def limit_remote_addr():
-        #     if request.remote_addr != self.supervisor.ip:
-        #         abort(http.HTTPStatus.FORBIDDEN)
+    def run_ssdp_server(self):
+        """Run the SSDP Advertiser."""
+        self.ssdp_server.run()
+
+    def run_rest(self):
+        """Run the REST api, using HTTPS."""
 
         # Route Handlers
 
@@ -62,22 +67,31 @@ class GreenHouse:
 
         @self.app.route("/get_configuration")
         def get_configuration():
-            # desc = "configuration for greenhouse {}".format(self.confi)
             r = make_response(json.dumps(self.configuration.__dict__))
             r.mimetype = 'application/json'
             return r
 
+        @self.app.route("/push_configuration", methods=['POST'])
+        def push_configuration():
+            content = request.get_json()
+            # TODO
+            return content, status.HTTP_200_OK
+
         @self.app.route("/camera")
         def camera():
             """Returns the last picture taken from the camera."""
-            return send_file("photo.jpg", mimetype='image/jpg')
+            try:
+                return send_file("photo.jpg", mimetype='image/jpg')
+            except FileNotFoundError:
+                abort(404)
 
         self.app.run(ssl_context='adhoc')
 
     def _join_request(self):
         """Send a join request and wait for response. Returns True if and only if the Supervisor accepted the join request."""
         assert(self.supervisor)
-        url = "http://" + str(self.supervisor.ip) + ":" + str(self.supervisor.port) + "/join" # TODO https
+        url = "http://" + str(self.supervisor.ip) + ":" + \
+            str(self.supervisor.port) + "/join"  # TODO https
         post_fields = {'name': self.configuration.name}
         request = Request(url, urlencode(post_fields).encode())
         got = urlopen(request)
